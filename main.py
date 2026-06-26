@@ -982,14 +982,49 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
+    import socket
+    
+    # 单实例检测
+    def is_single_instance():
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(('127.0.0.1', 19876))
+            return sock
+        except OSError:
+            return None
+    
+    sock = is_single_instance()
+    if sock is None:
+        QMessageBox.warning(None, '提示', '程序已在运行中！')
+        sys.exit(0)
+    
     start_minimized = '--minimized' in sys.argv
     
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)  # 关闭窗口不退出程序，通过托盘退出
+    app.setQuitOnLastWindowClosed(False)
     
     window = MainWindow(start_minimized=start_minimized)
     
     if not start_minimized:
         window.show()
     
-    sys.exit(app.exec_())
+    exit_code = app.exec_()
+    
+    # 关闭时清理子进程
+    import os
+    import signal
+    try:
+        parent_pid = os.getpid()
+        result = os.popen(f'wmic process where "ParentProcessId={parent_pid}" get ProcessId').read()
+        for line in result.strip().split('\n')[1:]:
+            line = line.strip()
+            if line.isdigit():
+                try:
+                    os.kill(int(line), signal.SIGTERM)
+                except:
+                    pass
+    except:
+        pass
+    
+    sock.close()
+    sys.exit(exit_code)
