@@ -857,102 +857,54 @@ class MainWindow(QMainWindow):
                     self.preset_manager.set_last_preset('')
                 self.show_status('预设已删除')
     
-    def get_startup_shortcut_path(self):
-        """获取Startup文件夹中快捷方式的路径"""
-        import os
-        startup_folder = os.path.join(os.environ['APPDATA'], 
-                                      'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')
-        return os.path.join(startup_folder, 'DNFBuffSwitcher.lnk')
-    
-    def create_startup_shortcut(self, exe_path, args=''):
-        """在Startup文件夹创建快捷方式"""
-        import os
-        import pythoncom
-        from win32com.client import Dispatch
-        
-        shortcut_path = self.get_startup_shortcut_path()
-        working_dir = os.path.dirname(exe_path)
-        
-        pythoncom.CoInitialize()
-        shell = Dispatch('WScript.Shell')
-        shortcut = shell.CreateShortCut(shortcut_path)
-        shortcut.TargetPath = exe_path
-        if args:
-            shortcut.Arguments = args
-        shortcut.WorkingDirectory = working_dir
-        shortcut.Save()
-        pythoncom.CoUninitialize()
-        return True
-    
-    def delete_startup_shortcut(self):
-        """删除Startup文件夹中的快捷方式"""
-        import os
-        shortcut_path = self.get_startup_shortcut_path()
-        if os.path.exists(shortcut_path):
-            os.remove(shortcut_path)
-            return True
-        return False
-    
-    def has_startup_shortcut(self):
-        """检查是否存在开机自启快捷方式"""
-        import os
-        return os.path.exists(self.get_startup_shortcut_path())
-    
     def verify_boot_start(self):
-        """启动时自动校验并修正开机自启路径"""
-        import os
-        import subprocess
+        """启动时自动校验并修正注册表中的开机自启路径"""
         import winreg
         
-        if not self.has_startup_shortcut():
-            return
-        
-        shortcut_path = self.get_startup_shortcut_path()
-        
         exe_path = sys.executable if hasattr(sys, 'frozen') else os.path.abspath(__file__)
         exe_path = os.path.abspath(exe_path)
+        cmd_with_args = f'"{exe_path}" --minimized'
         
         try:
-            import pythoncom
-            from win32com.client import Dispatch
-            
-            pythoncom.CoInitialize()
-            shell = Dispatch('WScript.Shell')
-            shortcut = shell.CreateShortCut(shortcut_path)
-            existing_target = shortcut.TargetPath
-            pythoncom.CoUninitialize()
-            
-            if existing_target != exe_path:
-                self.delete_startup_shortcut()
-                self.create_startup_shortcut(exe_path, '--minimized')
-                print(f"开机自启路径已更新: {exe_path}")
-            else:
-                print("开机自启路径正确")
-        except Exception as e:
-            print(f"校验开机自启快捷方式失败: {e}")
-    
-    def toggle_boot_start(self, state):
-        """用Startup文件夹快捷方式实现开机自启（最稳定）"""
-        exe_path = sys.executable if hasattr(sys, 'frozen') else os.path.abspath(__file__)
-        exe_path = os.path.abspath(exe_path)
-        
-        try:
-            if state == 2:  # 勾选
-                if self.create_startup_shortcut(exe_path, '--minimized'):
-                    self.show_status('已设置开机自启动(启动文件夹)')
-                else:
-                    import winreg
-                    cmd_with_args = f'"{exe_path}" --minimized'
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                 0, winreg.KEY_READ)
+            try:
+                existing_value, _ = winreg.QueryValueEx(key, 'DNFBuffSwitcher')
+                if cmd_with_args != existing_value:
+                    winreg.CloseKey(key)
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                          r'Software\Microsoft\Windows\CurrentVersion\Run',
                                          0, winreg.KEY_SET_VALUE)
                     winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
                     winreg.CloseKey(key)
-                    self.show_status('已设置开机自启动(注册表)')
+                    print(f"开机自启路径已更新: {cmd_with_args}")
+                else:
+                    print("开机自启路径正确")
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                return
+        except Exception as e:
+            print(f"校验开机自启路径失败: {e}")
+    
+    def toggle_boot_start(self, state):
+        """用注册表实现开机自启（最可靠）"""
+        import winreg
+        
+        exe_path = sys.executable if hasattr(sys, 'frozen') else os.path.abspath(__file__)
+        exe_path = os.path.abspath(exe_path)
+        cmd_with_args = f'"{exe_path}" --minimized'
+        
+        try:
+            if state == 2:  # 勾选
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                     r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                     0, winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
+                winreg.CloseKey(key)
+                self.show_status('已设置开机自启动')
             else:  # 取消
-                self.delete_startup_shortcut()
                 try:
-                    import winreg
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                          r'Software\Microsoft\Windows\CurrentVersion\Run',
                                          0, winreg.KEY_SET_VALUE)
@@ -963,6 +915,7 @@ class MainWindow(QMainWindow):
                 self.show_status('已取消开机自启动')
         except Exception as e:
             print(f"设置开机自启动失败: {e}")
+            self.show_status(f'设置失败: {e}')
     
     def closeEvent(self, event):
         if self._closing:
