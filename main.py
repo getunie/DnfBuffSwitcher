@@ -343,6 +343,8 @@ class MainWindow(QMainWindow):
         if self.preset_manager.last_preset and self.preset_manager.last_preset in self.preset_manager.get_all_presets():
             self.load_preset_by_name(self.preset_manager.last_preset, silent=True)
         
+        self.verify_boot_start()
+        
         # 开机自启时最小化到托盘
         if start_minimized:
             self.hide()
@@ -862,82 +864,95 @@ class MainWindow(QMainWindow):
                     self.preset_manager.set_last_preset('')
                 self.show_status('预设已删除')
     
-    def toggle_boot_start(self, state):
-        """用任务计划程序实现开机自启（支持管理员权限）"""
-        import subprocess
-        task_name = 'DNFBuffSwitcher'
+    def get_current_exe_path(self):
+        """获取当前程序的完整路径（带引号）"""
         exe_path = sys.executable if hasattr(sys, 'frozen') else os.path.abspath(__file__)
         exe_path = os.path.abspath(exe_path)
+        return f'"{exe_path}"'
+    
+    def verify_boot_start(self):
+        """启动时自动校验并修正开机自启路径"""
+        import winreg
+        import subprocess
+        
+        task_name = 'DNFBuffSwitcher'
+        current_exe = self.get_current_exe_path()
+        cmd_with_args = f'{current_exe} --minimized'
         
         try:
-            if state == 2:  # 勾选
-                # 创建任务计划：开机时以最高权限运行
-                xml = f'''<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-    </LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="Author">
-      <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Enabled>true</Enabled>
-    <Hidden>true</Hidden>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>"{exe_path}"</Command>
-      <Arguments>--minimized</Arguments>
-    </Exec>
-  </Actions>
-</Task>'''
-                # 先删除旧任务（如果存在）
-                subprocess.run(['schtasks', '/End', '/TN', task_name],
-                               capture_output=True)
-                subprocess.run(['schtasks', '/Delete', '/TN', task_name, '/F'],
-                               capture_output=True)
-                # 写入临时XML文件
-                import tempfile
-                xml_path = os.path.join(tempfile.gettempdir(), 'dnf_buff_task.xml')
-                with open(xml_path, 'w', encoding='utf-16') as f:
-                    f.write(xml)
-                # 创建任务
-                result = subprocess.run(
-                    ['schtasks', '/Create', '/TN', task_name, '/XML', xml_path, '/F'],
-                    capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.show_status('已设置开机自启动(任务计划)')
-                else:
-                    # 回退到注册表方式
-                    import winreg
-                    cmd = f'"{exe_path}" --minimized'
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                 0, winreg.KEY_READ)
+            try:
+                existing_value, _ = winreg.QueryValueEx(key, 'DNFBuffSwitcher')
+                if current_exe not in existing_value:
+                    winreg.CloseKey(key)
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                          r'Software\Microsoft\Windows\CurrentVersion\Run',
                                          0, winreg.KEY_SET_VALUE)
-                    winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd)
+                    winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
+                    print(f"开机自启路径已更新: {cmd_with_args}")
+                else:
+                    print("开机自启路径正确")
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(f"校验开机自启路径失败: {e}")
+        
+        try:
+            result = subprocess.run(
+                ['schtasks', '/Query', '/TN', task_name, '/FO', 'LIST'],
+                capture_output=True, text=True)
+            if result.returncode == 0:
+                if current_exe.strip('"') not in result.stdout:
+                    subprocess.run(['schtasks', '/End', '/TN', task_name], capture_output=True)
+                    subprocess.run(['schtasks', '/Delete', '/TN', task_name, '/F'], capture_output=True)
+                    subprocess.run(
+                        ['schtasks', '/Create', '/TN', task_name,
+                         '/TR', cmd_with_args,
+                         '/SC', 'ONLOGON',
+                         '/RL', 'HIGHEST',
+                         '/F'],
+                        capture_output=True, text=True)
+                    print(f"任务计划路径已更新")
+        except Exception as e:
+            print(f"校验任务计划失败: {e}")
+    
+    def toggle_boot_start(self, state):
+        """用任务计划程序实现开机自启（支持管理员权限）"""
+        import subprocess
+        import winreg
+        
+        task_name = 'DNFBuffSwitcher'
+        cmd_with_args = f'{self.get_current_exe_path()} --minimized'
+        
+        try:
+            if state == 2:  # 勾选
+                result = subprocess.run(
+                    ['schtasks', '/Create', '/TN', task_name,
+                     '/TR', cmd_with_args,
+                     '/SC', 'ONLOGON',
+                     '/RL', 'HIGHEST',
+                     '/F'],
+                    capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    self.show_status('已设置开机自启动(任务计划)')
+                else:
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                         r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                         0, winreg.KEY_SET_VALUE)
+                    winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
                     winreg.CloseKey(key)
                     self.show_status('已设置开机自启动(注册表)')
             else:  # 取消
                 subprocess.run(['schtasks', '/End', '/TN', task_name],
                                capture_output=True)
-                result = subprocess.run(
-                    ['schtasks', '/Delete', '/TN', task_name, '/F'],
-                    capture_output=True, text=True)
-                # 同时清理注册表
+                subprocess.run(['schtasks', '/Delete', '/TN', task_name, '/F'],
+                               capture_output=True)
+                
                 try:
-                    import winreg
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                          r'Software\Microsoft\Windows\CurrentVersion\Run',
                                          0, winreg.KEY_SET_VALUE)
