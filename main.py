@@ -177,14 +177,42 @@ class VocationMapping:
     
     def load_from_excel(self, filepath):
         try:
-            wb = load_workbook(filepath)
+            wb = load_workbook(filepath, data_only=True)
             ws = wb.active
+            
+            header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+            if not header_row:
+                print("导入Excel失败: 表头为空")
+                return False
+            
+            vocation_col_idx = -1
+            filename_col_idx = -1
+            for idx, cell in enumerate(header_row):
+                if cell and '职业' in str(cell):
+                    vocation_col_idx = idx
+                elif cell and '文件' in str(cell):
+                    filename_col_idx = idx
+            
+            if vocation_col_idx == -1 or filename_col_idx == -1:
+                print(f"导入Excel失败: 未找到职业名列或文件名列，表头: {header_row}")
+                return False
+            
+            self.mappings = {}
             for row in ws.iter_rows(min_row=2, values_only=True):
-                if row and len(row) >= 2 and row[0] and row[1]:
-                    vocation = str(row[0]).strip()
-                    target_filename = str(row[1]).strip()
-                    if vocation and target_filename and not vocation.startswith('【'):
-                        self.mappings[vocation] = target_filename
+                if row:
+                    if len(row) > max(vocation_col_idx, filename_col_idx):
+                        vocation_cell = row[vocation_col_idx]
+                        filename_cell = row[filename_col_idx]
+                        
+                        if vocation_cell and filename_cell:
+                            vocation = str(vocation_cell).strip()
+                            target_filename = str(filename_cell).strip()
+                            
+                            if vocation and target_filename:
+                                if '【' in vocation or '】' in vocation:
+                                    continue
+                                self.mappings[vocation] = target_filename
+            
             return True
         except Exception as e:
             print(f"导入Excel失败: {e}")
