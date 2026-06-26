@@ -858,69 +858,58 @@ class MainWindow(QMainWindow):
                 self.show_status('预设已删除')
     
     def verify_boot_start(self):
-        """启动时自动校验并修正任务计划中的开机自启路径"""
-        import subprocess
+        """启动时自动校验并修正注册表中的开机自启路径"""
+        import winreg
         
-        task_name = 'DNFBuffSwitcher'
         exe_path = sys.executable if hasattr(sys, 'frozen') else os.path.abspath(__file__)
         exe_path = os.path.abspath(exe_path)
         cmd_with_args = f'"{exe_path}" --minimized'
         
         try:
-            result = subprocess.run(
-                ['schtasks', '/Query', '/TN', task_name, '/FO', 'LIST', '/V'],
-                capture_output=True, text=True)
-            if result.returncode == 0:
-                if exe_path not in result.stdout:
-                    subprocess.run(['schtasks', '/Delete', '/TN', task_name, '/F'],
-                                   capture_output=True)
-                    subprocess.run(
-                        ['schtasks', '/Create', '/TN', task_name,
-                         '/TR', cmd_with_args,
-                         '/SC', 'ONLOGON',
-                         '/RL', 'HIGHEST',
-                         '/F'],
-                        capture_output=True, text=True)
-                    print(f"任务计划路径已更新: {exe_path}")
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                 0, winreg.KEY_READ)
+            try:
+                existing_value, _ = winreg.QueryValueEx(key, 'DNFBuffSwitcher')
+                winreg.CloseKey(key)
+                if cmd_with_args != existing_value:
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                         r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                         0, winreg.KEY_SET_VALUE)
+                    winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
+                    winreg.CloseKey(key)
+                    print(f"开机自启路径已更新: {cmd_with_args}")
                 else:
-                    print("任务计划路径正确")
+                    print("开机自启路径正确")
+            except FileNotFoundError:
+                winreg.CloseKey(key)
         except Exception as e:
-            print(f"校验任务计划失败: {e}")
+            print(f"校验开机自启路径失败: {e}")
     
     def toggle_boot_start(self, state):
-        """用任务计划程序实现开机自启（最可靠，支持管理员权限）"""
-        import subprocess
+        """用注册表实现开机自启（不需要管理员权限，最可靠）"""
         import winreg
         
-        task_name = 'DNFBuffSwitcher'
         exe_path = sys.executable if hasattr(sys, 'frozen') else os.path.abspath(__file__)
         exe_path = os.path.abspath(exe_path)
         cmd_with_args = f'"{exe_path}" --minimized'
         
         try:
             if state == 2:  # 勾选
-                # 使用任务计划程序，以最高权限运行
-                result = subprocess.run(
-                    ['schtasks', '/Create', '/TN', task_name,
-                     '/TR', cmd_with_args,
-                     '/SC', 'ONLOGON',
-                     '/RL', 'HIGHEST',
-                     '/F'],
-                    capture_output=True, text=True)
-                
-                if result.returncode == 0:
-                    self.show_status('已设置开机自启动(任务计划)')
-                else:
-                    # 备选：注册表方式
-                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                         r'Software\Microsoft\Windows\CurrentVersion\Run',
-                                         0, winreg.KEY_SET_VALUE)
-                    winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
-                    winreg.CloseKey(key)
-                    self.show_status('已设置开机自启动(注册表)')
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                     r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                     0, winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
+                winreg.CloseKey(key)
+                self.show_status('已设置开机自启动')
+                # 验证是否写入成功
+                key2 = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                      r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                      0, winreg.KEY_READ)
+                val, _ = winreg.QueryValueEx(key2, 'DNFBuffSwitcher')
+                winreg.CloseKey(key2)
+                print(f"验证注册表写入成功: {val}")
             else:  # 取消
-                subprocess.run(['schtasks', '/Delete', '/TN', task_name, '/F'],
-                               capture_output=True)
                 try:
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                          r'Software\Microsoft\Windows\CurrentVersion\Run',
