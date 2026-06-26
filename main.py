@@ -345,10 +345,8 @@ class MainWindow(QMainWindow):
         
         self.verify_boot_start()
         
-        # 开机自启时最小化到托盘
+        # 仅开机自启时最小化到托盘
         if start_minimized:
-            self.hide()
-        elif self.hide_after_start_check.isChecked():
             self.hide()
     
     def init_tray(self):
@@ -638,8 +636,6 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet('background-color: #4CAF50; color: white;')
             self.show_status(f'{config["vocation"]} 已启动')
             
-            if self.hide_after_start_check.isChecked():
-                self.hide()
         else:
             self.stop_switcher(row)
     
@@ -674,9 +670,6 @@ class MainWindow(QMainWindow):
                     started += 1
         
         self.show_status(f'已启动 {started} 个职业')
-        
-        if self.hide_after_start_check.isChecked():
-            self.hide()
     
     def stop_all(self):
         for row in list(self.switchers.keys()):
