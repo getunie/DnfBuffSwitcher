@@ -343,7 +343,9 @@ class MainWindow(QMainWindow):
         if self.preset_manager.last_preset and self.preset_manager.last_preset in self.preset_manager.get_all_presets():
             self.load_preset_by_name(self.preset_manager.last_preset, silent=True)
         
-        self.verify_boot_start()
+        # 如果配置中启用了开机自启，确保注册表正确
+        if gs.get('boot_start', False):
+            self.verify_and_fix_boot_start()
         
         # 仅开机自启时最小化到托盘
         if start_minimized:
@@ -857,8 +859,8 @@ class MainWindow(QMainWindow):
                     self.preset_manager.set_last_preset('')
                 self.show_status('预设已删除')
     
-    def verify_boot_start(self):
-        """启动时自动校验并修正注册表中的开机自启路径"""
+    def verify_and_fix_boot_start(self):
+        """启动时校验注册表开机自启，不存在则自动创建"""
         import winreg
         
         exe_path = sys.executable if hasattr(sys, 'frozen') else os.path.abspath(__file__)
@@ -872,19 +874,27 @@ class MainWindow(QMainWindow):
             try:
                 existing_value, _ = winreg.QueryValueEx(key, 'DNFBuffSwitcher')
                 winreg.CloseKey(key)
+                # 值存在，检查路径是否正确
                 if cmd_with_args != existing_value:
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                          r'Software\Microsoft\Windows\CurrentVersion\Run',
                                          0, winreg.KEY_SET_VALUE)
                     winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
                     winreg.CloseKey(key)
-                    print(f"开机自启路径已更新: {cmd_with_args}")
-                else:
-                    print("开机自启路径正确")
             except FileNotFoundError:
                 winreg.CloseKey(key)
+                # 值不存在，自动创建
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                     r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                     0, winreg.KEY_SET_VALUE)
+                winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
+                winreg.CloseKey(key)
         except Exception as e:
-            print(f"校验开机自启路径失败: {e}")
+            print(f"校验开机自启失败: {e}")
+    
+    def verify_boot_start(self):
+        """兼容旧调用"""
+        self.verify_and_fix_boot_start()
     
     def toggle_boot_start(self, state):
         """用注册表实现开机自启（不需要管理员权限，最可靠）"""
@@ -901,14 +911,15 @@ class MainWindow(QMainWindow):
                                      0, winreg.KEY_SET_VALUE)
                 winreg.SetValueEx(key, 'DNFBuffSwitcher', 0, winreg.REG_SZ, cmd_with_args)
                 winreg.CloseKey(key)
-                self.show_status('已设置开机自启动')
                 # 验证是否写入成功
                 key2 = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                       r'Software\Microsoft\Windows\CurrentVersion\Run',
                                       0, winreg.KEY_READ)
                 val, _ = winreg.QueryValueEx(key2, 'DNFBuffSwitcher')
                 winreg.CloseKey(key2)
-                print(f"验证注册表写入成功: {val}")
+                self.show_status('已设置开机自启动')
+                QMessageBox.information(self, '开机自启动', 
+                    f'已成功设置开机自启动！\n\n注册表路径: HKCU\\...\\Run\\DNFBuffSwitcher\n值: {val}')
             else:  # 取消
                 try:
                     key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -920,8 +931,9 @@ class MainWindow(QMainWindow):
                     pass
                 self.show_status('已取消开机自启动')
         except Exception as e:
-            print(f"设置开机自启动失败: {e}")
             self.show_status(f'设置失败: {e}')
+            QMessageBox.warning(self, '开机自启动失败', 
+                f'设置开机自启动失败！\n\n错误: {e}\n\n请尝试右键exe以管理员身份运行后再设置。')
     
     def closeEvent(self, event):
         if self._closing:
