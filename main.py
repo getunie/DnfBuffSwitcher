@@ -22,7 +22,7 @@ else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(APP_DIR, 'config.json')
-DEFAULT_EXCEL_PATH = r'd:\MyWork\DnfBuffAnime\BUFF动画职业名对照表.xlsx'
+DEFAULT_EXCEL_PATH = os.path.join(APP_DIR, 'BUFF动画职业名对照表.xlsx')
 
 
 class PresetNameDialog(QDialog):
