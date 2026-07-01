@@ -1,3 +1,4 @@
 PyQt5==5.15.10
 openpyxl==3.1.2
 pywin32==306
+imageio-ffmpeg

@@ -10,19 +10,28 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTableWidget, QTableWidgetItem, QPushButton, QLineEdit, 
                              QComboBox, QSpinBox, QFileDialog, QMessageBox, QLabel,
                              QCheckBox, QTextEdit, QGroupBox, QHeaderView, 
-                             QSystemTrayIcon, QMenu, QAction, QDialog, 
-                             QDialogButtonBox, QStatusBar)
-from PyQt5.QtGui import QIcon
+                             QSystemTrayIcon, QMenu, QAction, QDialog,
+                             QDialogButtonBox, QStatusBar, QScrollArea,
+                             QGridLayout, QFrame, QProgressBar, QProgressDialog)
+from PyQt5.QtGui import QIcon, QMovie, QPixmap
+import subprocess
+import tempfile
 from openpyxl import load_workbook
 
 # 路径处理：config.json放在exe所在目录
 if getattr(sys, 'frozen', False):
     APP_DIR = os.path.dirname(sys.executable)
+    # PyInstaller内置资源目录
+    BUNDLE_DIR = getattr(sys, '_MEIPASS', APP_DIR)
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    BUNDLE_DIR = APP_DIR
 
 CONFIG_FILE = os.path.join(APP_DIR, 'config.json')
+# 优先从exe目录找Excel，其次从内置资源目录找
 DEFAULT_EXCEL_PATH = os.path.join(APP_DIR, 'BUFF动画职业名对照表.xlsx')
+if not os.path.exists(DEFAULT_EXCEL_PATH):
+    DEFAULT_EXCEL_PATH = os.path.join(BUNDLE_DIR, 'BUFF动画职业名对照表.xlsx')
 
 
 class PresetNameDialog(QDialog):
@@ -42,6 +51,402 @@ class PresetNameDialog(QDialog):
     
     def get_name(self):
         return self.input.text().strip()
+
+
+def find_ffmpeg():
+    """查找ffmpeg：优先用imageio-ffmpeg内置的，再找程序目录和PATH"""
+    # 1. imageio-ffmpeg 内置（最可靠，打包后也有效）
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    # 2. 程序目录
+    local_ffmpeg = os.path.join(APP_DIR, 'ffmpeg.exe')
+    if os.path.isfile(local_ffmpeg):
+        return local_ffmpeg
+    # 3. PATH
+    import shutil as _sh
+    return _sh.which('ffmpeg')
+
+
+class Bk2PreviewDialog(QDialog):
+    """Bk2动画预览对话框：用ffmpeg转gif后用QMovie播放"""
+    def __init__(self, bk2_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Buff动画预览')
+        self.setMinimumSize(380, 280)
+        self.bk2_path = bk2_path
+        self.gif_path = None
+        self.movie = None
+
+        layout = QVBoxLayout(self)
+
+        # 文件名
+        name = os.path.basename(bk2_path)
+        layout.addWidget(QLabel(f'文件: {name}'))
+
+        # 预览区域
+        self.preview_label = QLabel('正在转换，请稍候...')
+        self.preview_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.preview_label.setMinimumSize(320, 180)
+        layout.addWidget(self.preview_label)
+
+        # 按钮
+        btn_layout = QHBoxLayout()
+        open_ext_btn = QPushButton('用系统默认程序打开')
+        open_ext_btn.clicked.connect(self.open_external)
+        btn_layout.addWidget(open_ext_btn)
+        btn_layout.addStretch()
+        close_btn = QPushButton('关闭')
+        close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+        # 开始转换
+        QtCore.QTimer.singleShot(100, self.convert_to_gif)
+
+    def convert_to_gif(self):
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            self.preview_label.setText(
+                '未找到 ffmpeg.exe！\n\n'
+                '请下载 ffmpeg.exe 放到程序同目录下，\n'
+                '或点击下方"用系统默认程序打开"。\n\n'
+                'ffmpeg下载: https://ffmpeg.org/download.html')
+            return
+
+        # 临时gif
+        self.gif_path = os.path.join(tempfile.gettempdir(), f'bk2_preview_{os.getpid()}.gif')
+        if os.path.exists(self.gif_path):
+            os.remove(self.gif_path)
+
+        # 调用ffmpeg转换: 10fps, 宽度320, 最多5秒
+        cmd = [ffmpeg, '-y', '-i', self.bk2_path,
+               '-vf', 'fps=10,scale=320:-1:flags=lanczos',
+               '-t', '5', '-loop', '0', self.gif_path]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=30,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+            if result.returncode != 0 or not os.path.exists(self.gif_path):
+                err = result.stderr.decode('utf-8', errors='ignore')[-500:]
+                self.preview_label.setText(f'转换失败!\n\nffmpeg错误:\n{err}')
+                return
+        except Exception as e:
+            self.preview_label.setText(f'转换失败!\n\n错误: {e}')
+            return
+
+        # 用QMovie播放
+        self.movie = QMovie(self.gif_path)
+        if not self.movie.isValid():
+            self.preview_label.setText('无法加载gif，请用系统默认程序打开。')
+            return
+        self.movie.setCacheMode(QMovie.CacheAll)
+        self.movie.start()
+        self.preview_label.setMovie(self.movie)
+        self.preview_label.setText('')
+
+    def open_external(self):
+        try:
+            os.startfile(self.bk2_path)
+        except Exception as e:
+            QMessageBox.warning(self, '错误', f'无法打开文件:\n{e}')
+
+    def closeEvent(self, event):
+        if self.movie:
+            self.movie.stop()
+        if self.gif_path and os.path.exists(self.gif_path):
+            try:
+                os.remove(self.gif_path)
+            except Exception:
+                pass
+        event.accept()
+
+
+class Bk2GalleryDialog(QDialog):
+    """备用库画廊：展示所有bk2缩略图，可分配给职业"""
+    def __init__(self, backup_path, thumb_dir, rows_info, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('备用动画库 - 点击选择后分配给职业')
+        self.setMinimumSize(740, 740)
+        self.backup_path = backup_path
+        self.thumb_dir = thumb_dir
+        self.rows_info = rows_info
+        self.main_window = parent
+        self.selected_files = set()
+        self.frame_widgets = {}
+        self.preview_mode = 'standard'
+        self.bk2_files = []
+
+        self.STANDARD_SIZE = (180, 140)
+        self.LARGE_SIZE = (360, 280)
+
+        layout = QVBoxLayout(self)
+
+        # 顶部说明 + 全选/取消全选 + 模式切换
+        top_bar = QHBoxLayout()
+        top_label = QLabel('点击缩略图选中/取消，支持多选。选好后选择职业并点击"分配"')
+        top_label.setStyleSheet('color: #555; padding: 4px;')
+        top_bar.addWidget(top_label)
+        top_bar.addStretch()
+
+        self.mode_btn = QPushButton('大图预览')
+        self.mode_btn.clicked.connect(self.toggle_mode)
+        top_bar.addWidget(self.mode_btn)
+
+        self.select_all_btn = QPushButton('全选')
+        self.select_all_btn.clicked.connect(self.select_all)
+        top_bar.addWidget(self.select_all_btn)
+        self.deselect_all_btn = QPushButton('取消全选')
+        self.deselect_all_btn.clicked.connect(self.deselect_all)
+        top_bar.addWidget(self.deselect_all_btn)
+        layout.addLayout(top_bar)
+
+        # 缩略图网格
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll_content = QWidget()
+        self.grid = QGridLayout(self.scroll_content)
+        self.grid.setSpacing(8)
+        self.scroll.setWidget(self.scroll_content)
+        layout.addWidget(self.scroll)
+
+        # 底部分配栏
+        bottom = QHBoxLayout()
+        self.selected_label = QLabel('未选择文件')
+        bottom.addWidget(self.selected_label)
+        bottom.addStretch()
+
+        bottom.addWidget(QLabel('动画分组:'))
+        self.vocation_combo = QComboBox()
+        groups = {}
+        for info in rows_info:
+            keyword = info.get('keyword', '')
+            if keyword and keyword not in groups:
+                vocations = [i['vocation'] for i in rows_info if i.get('keyword') == keyword]
+                groups[keyword] = vocations
+        for keyword, vocations in groups.items():
+            label = f"{keyword} ({', '.join(vocations)})"
+            self.vocation_combo.addItem(label, keyword)
+        bottom.addWidget(self.vocation_combo)
+
+        self.assign_btn = QPushButton('分配（复制到动画路径）')
+        self.assign_btn.clicked.connect(self.assign_to_vocation)
+        self.assign_btn.setEnabled(False)
+        bottom.addWidget(self.assign_btn)
+
+        self.preview_btn = QPushButton('预览动画')
+        self.preview_btn.clicked.connect(self.preview_selected)
+        self.preview_btn.setEnabled(False)
+        bottom.addWidget(self.preview_btn)
+
+        close_btn = QPushButton('关闭')
+        close_btn.clicked.connect(self.close)
+        bottom.addWidget(close_btn)
+
+        layout.addLayout(bottom)
+
+        self.load_thumbnails()
+
+    def toggle_mode(self):
+        """切换预览模式"""
+        saved_selection = set(self.selected_files)
+        if self.preview_mode == 'standard':
+            self.preview_mode = 'large'
+            self.mode_btn.setText('标准预览')
+        else:
+            self.preview_mode = 'standard'
+            self.mode_btn.setText('大图预览')
+        self.load_thumbnails()
+        self.selected_files = saved_selection & set(self.frame_widgets.keys())
+        self.update_selection_ui()
+
+    def load_thumbnails(self):
+        """加载所有bk2缩略图"""
+        self.bk2_files = sorted([f for f in os.listdir(self.backup_path)
+                                if f.lower().endswith('.bk2')])
+        if not self.bk2_files:
+            self.selected_label.setText('备用路径中没有.bk2文件')
+            return
+
+        self.frame_widgets.clear()
+        for i in range(self.grid.count()):
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        size = self.LARGE_SIZE if self.preview_mode == 'large' else self.STANDARD_SIZE
+        img_size = (size[0] - 10, int(size[1] * 0.68))
+
+        for bk2 in self.bk2_files:
+            frame = QFrame()
+            frame.setFrameStyle(QFrame.Box)
+            frame.setFixedSize(size[0], size[1])
+            frame_layout = QVBoxLayout(frame)
+            frame_layout.setContentsMargins(2, 2, 2, 2)
+
+            thumb_name = os.path.splitext(bk2)[0] + '.png'
+            thumb_path = os.path.join(self.thumb_dir, thumb_name)
+            img_label = QLabel()
+            img_label.setAlignment(QtCore.Qt.AlignCenter)
+            img_label.setMinimumSize(img_size[0], img_size[1])
+            if os.path.exists(thumb_path):
+                pix = QPixmap(thumb_path)
+                if not pix.isNull():
+                    img_label.setPixmap(pix.scaled(img_size[0], img_size[1],
+                                                   QtCore.Qt.KeepAspectRatio,
+                                                   QtCore.Qt.SmoothTransformation))
+                else:
+                    img_label.setText('无预览图')
+            else:
+                img_label.setText('未生成\n预览图')
+
+            name_label = QLabel(bk2)
+            name_label.setWordWrap(True)
+            name_label.setMaximumHeight(size[1] - img_size[1] - 8)
+            name_label.setStyleSheet('font-size: 10px;')
+
+            frame_layout.addWidget(img_label)
+            frame_layout.addWidget(name_label)
+
+            frame.mousePressEvent = lambda e, f=bk2: self.toggle_select(f)
+            img_label.mousePressEvent = lambda e, f=bk2: self.toggle_select(f)
+            name_label.mousePressEvent = lambda e, f=bk2: self.toggle_select(f)
+
+            self.frame_widgets[bk2] = frame
+
+        self.layout_thumbnails()
+
+    def layout_thumbnails(self):
+        """根据窗口宽度动态布局缩略图"""
+        for i in range(self.grid.count()):
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+
+        if not self.bk2_files:
+            return
+
+        size = self.LARGE_SIZE if self.preview_mode == 'large' else self.STANDARD_SIZE
+        spacing = 8
+
+        container_width = self.scroll_content.width()
+        if container_width < 100:
+            container_width = 720
+
+        col_count = max(1, container_width // (size[0] + spacing))
+        col_count = max(1, min(col_count, len(self.bk2_files)))
+
+        for i, bk2 in enumerate(self.bk2_files):
+            row = i // col_count
+            col = i % col_count
+            self.grid.addWidget(self.frame_widgets[bk2], row, col)
+
+    def resizeEvent(self, event):
+        """窗口大小变化时重新布局"""
+        super().resizeEvent(event)
+        QtCore.QTimer.singleShot(50, self.layout_thumbnails)
+
+    def toggle_select(self, bk2_name):
+        """切换选中状态"""
+        if bk2_name in self.selected_files:
+            self.selected_files.discard(bk2_name)
+        else:
+            self.selected_files.add(bk2_name)
+        self.update_selection_ui()
+
+    def update_selection_ui(self):
+        """更新选中状态UI"""
+        for bk2, frame in self.frame_widgets.items():
+            if bk2 in self.selected_files:
+                frame.setStyleSheet('QFrame { border: 3px solid #2196F3; background-color: #E3F2FD; }')
+            else:
+                frame.setStyleSheet('')
+        count = len(self.selected_files)
+        if count == 0:
+            self.selected_label.setText('未选择文件')
+            self.selected_label.setStyleSheet('color: #555; padding: 4px;')
+            self.assign_btn.setEnabled(False)
+            self.preview_btn.setEnabled(False)
+        else:
+            self.selected_label.setText(f'已选择 {count} 个文件')
+            self.selected_label.setStyleSheet('color: #2196F3; font-weight: bold; padding: 4px;')
+            self.assign_btn.setEnabled(True)
+            self.preview_btn.setEnabled(count == 1)
+
+    def select_all(self):
+        """全选"""
+        self.selected_files = set(self.frame_widgets.keys())
+        self.update_selection_ui()
+
+    def deselect_all(self):
+        """取消全选"""
+        self.selected_files.clear()
+        self.update_selection_ui()
+
+    def preview_selected(self):
+        """预览选中的bk2（仅单选时可用）"""
+        if len(self.selected_files) != 1:
+            return
+        bk2_name = next(iter(self.selected_files))
+        bk2_path = os.path.join(self.backup_path, bk2_name)
+        dlg = Bk2PreviewDialog(bk2_path, self)
+        dlg.exec_()
+
+    def assign_to_vocation(self):
+        """将选中的多个bk2复制到动画路径，以动画分组前缀命名"""
+        if not self.selected_files:
+            return
+
+        keyword = self.vocation_combo.currentData()
+        if not keyword:
+            QMessageBox.warning(self, '警告', '请先在主页添加动画分组!')
+            return
+
+        target_filepath = self.main_window.global_filepath
+
+        if not target_filepath or not os.path.isdir(target_filepath):
+            QMessageBox.warning(self, '警告', '主动画路径未设置!')
+            return
+
+        # 确认对话框，显示目标路径
+        current_text = self.vocation_combo.currentText()
+        confirm = QMessageBox.question(
+            self, '确认分配',
+            f'即将将 {len(self.selected_files)} 个文件复制到:\n\n'
+            f'{target_filepath}\n\n'
+            f'动画分组: {keyword}\n'
+            f'关联职业: {current_text}\n'
+            f'文件名格式: {keyword}随机数.bk2\n\n'
+            '是否继续?',
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        # 批量复制
+        success = 0
+        failed = []
+        for bk2_name in self.selected_files:
+            src = os.path.join(self.backup_path, bk2_name)
+            if keyword:
+                new_name = f"{keyword}{random.randint(1000, 9999)}.bk2"
+            else:
+                new_name = bk2_name
+            dst = os.path.join(target_filepath, new_name)
+            try:
+                shutil.copy2(src, dst)
+                success += 1
+            except Exception as e:
+                failed.append(f'{bk2_name}: {e}')
+
+        msg = f'复制完成! 成功: {success}/{len(self.selected_files)}'
+        if failed:
+            msg += f'\n\n失败:\n' + '\n'.join(failed[:5])
+        QMessageBox.information(self, '完成', msg)
+        self.main_window.show_status(f'已分配 {success} 个文件到动画路径')
 
 
 class GlobalFileManager:
@@ -315,6 +720,8 @@ class MainWindow(QMainWindow):
         self.preset_manager = PresetManager()
         self.switchers = {}
         self.global_filepath = ''
+        self.backup_filepath = ''
+        self.thumb_dir = os.path.join(APP_DIR, 'thumbnails')
         self.file_manager = GlobalFileManager()
         self._closing = False
         self._loading = False  # 加载预设时禁止触发保存
@@ -336,7 +743,14 @@ class MainWindow(QMainWindow):
         if gs.get('filepath', ''):
             self.global_filepath = gs.get('filepath', '')
             self.path_edit.setText(self.global_filepath)
+        if gs.get('backup_filepath', ''):
+            self.backup_filepath = gs.get('backup_filepath', '')
+            self.backup_path_edit.setText(self.backup_filepath)
         self.default_interval_spin.setValue(gs.get('default_interval', 30))
+
+        # 自动导入Excel对应表
+        self.auto_import_excel(gs)
+
         self._loading = False
         
         # 启动时自动加载上次使用的预设（静默）
@@ -429,25 +843,39 @@ class MainWindow(QMainWindow):
         path_layout.addWidget(self.close_to_tray_check)
         
         layout.addWidget(path_group)
-        
+
+        # 备用动画路径
+        backup_group = QGroupBox('备用动画库')
+        backup_layout = QHBoxLayout(backup_group)
+        backup_layout.addWidget(QLabel('备用路径:'))
+        self.backup_path_edit = QLineEdit()
+        backup_layout.addWidget(self.backup_path_edit)
+        self.backup_browse_btn = QPushButton('浏览')
+        self.backup_browse_btn.clicked.connect(self.browse_backup_path)
+        backup_layout.addWidget(self.backup_browse_btn)
+        self.gen_thumb_btn = QPushButton('生成预览图')
+        self.gen_thumb_btn.clicked.connect(self.generate_thumbnails)
+        backup_layout.addWidget(self.gen_thumb_btn)
+        self.gallery_btn = QPushButton('浏览备用库')
+        self.gallery_btn.clicked.connect(self.open_gallery)
+        backup_layout.addWidget(self.gallery_btn)
+        layout.addWidget(backup_group)
+
         # 职业配置表
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(['职业', '关键词', '间隔(秒)', '状态'])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(['职业', '动画分组', '间隔(秒)', '状态', '删除'])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         layout.addWidget(self.table)
         
         # 操作按钮
         btn_layout = QHBoxLayout()
         
-        self.add_btn = QPushButton('添加')
+        self.add_btn = QPushButton('添加职业')
         self.add_btn.clicked.connect(self.add_row)
         btn_layout.addWidget(self.add_btn)
-        
-        self.delete_btn = QPushButton('删除')
-        self.delete_btn.clicked.connect(self.delete_row)
-        btn_layout.addWidget(self.delete_btn)
         
         self.import_btn = QPushButton('导入对应表')
         self.import_btn.clicked.connect(lambda: self.import_excel())
@@ -498,13 +926,13 @@ class MainWindow(QMainWindow):
         self.help_text.setMaximumHeight(150)
         self.help_text.setHtml("""
         <strong>Q:如何使用？</strong><br>
-        A:导入一起下载的对应表，点击添加选取你想随机的职业，并将你想为这个职业随机的动画文件全部重命名为含有同个关键词的命名，如将为剑魂的全部批量重命名为：RenameSword，那么设定关键词为：RenameSword就会自动按设定间隔与方式切换剑魂的buff动画<br><br>
+        A:导入一起下载的对应表，点击添加选取你想随机的职业，并将你想为这个职业随机的动画文件全部重命名为含有同个动画分组的命名，如将为剑魂的全部批量重命名为：RenameSword，那么设定动画分组为：RenameSword就会自动按设定间隔与方式切换剑魂的buff动画<br><br>
         <strong>Q:可以多个职业的BUFF动画都切换吗？</strong><br>
         A:可以，上方添加另一个职业的即可。<br><br>
         <strong>Q:可以为不同职业设定不同动画吗？</strong><br>
-        A:可以，将A职业的关键词为关键词A，B职业的关键词为关键词B，两个关键词区分即可，但是关键词不能包含另一个，如剑魂为RenameSword，剑帝为RenameSwordF就会混到一起，想区分开来可以改剑帝的为RenameFSword<br><br>
-        <strong>Q:关键词可以相同吗？</strong><br>
-        A:可以，支持多职业共享同一关键词，自动处理文件冲突。
+        A:可以，将A职业的动画分组为动画分组A，B职业的动画分组为动画分组B，两个动画分组区分即可，但是动画分组不能包含另一个，如剑魂为RenameSword，剑帝为RenameSwordF就会混到一起，想区分开来可以改剑帝的为RenameFSword<br><br>
+        <strong>Q:动画分组可以相同吗？</strong><br>
+        A:可以，支持多职业共享同一动画分组，自动处理文件冲突。
         """)
         help_layout.addWidget(self.help_text)
         layout.addWidget(help_group)
@@ -526,6 +954,7 @@ class MainWindow(QMainWindow):
             'hide_after_start': self.hide_after_start_check.isChecked(),
             'close_to_tray': self.close_to_tray_check.isChecked(),
             'filepath': self.global_filepath,
+            'backup_filepath': self.backup_filepath,
             'default_interval': self.default_interval_spin.value()
         }
         self.preset_manager.save_global_settings(settings)
@@ -540,10 +969,150 @@ class MainWindow(QMainWindow):
     def browse_global_path(self):
         path = QFileDialog.getExistingDirectory(self, '选择Buff动画文件夹')
         if path:
+            # 检查是否误选为程序所在目录
+            if os.path.abspath(path) == os.path.abspath(APP_DIR):
+                QMessageBox.warning(
+                    self, '警告', 
+                    f'检测到您选择了程序所在目录:\n{path}\n\n'
+                    '请选择游戏Buff动画的实际存放路径（通常在游戏安装目录下）。\n'
+                    '如果继续使用此路径，动画文件将被复制到程序目录中。'
+                )
             self.path_edit.setText(path)
             self.global_filepath = path
             self.on_global_setting_changed()
             self.show_status(f'路径已设置: {path}')
+
+    def browse_backup_path(self):
+        path = QFileDialog.getExistingDirectory(self, '选择备用动画文件夹')
+        if path:
+            self.backup_path_edit.setText(path)
+            self.backup_filepath = path
+            self.on_global_setting_changed()
+            self.show_status(f'备用路径已设置: {path}')
+
+    def generate_thumbnails(self):
+        """为备用路径下所有bk2文件生成缩略图"""
+        if not self.backup_filepath or not os.path.isdir(self.backup_filepath):
+            QMessageBox.warning(self, '警告', '请先设置备用动画路径!')
+            return
+
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg:
+            QMessageBox.warning(self, '错误', '未找到ffmpeg，无法生成预览图!')
+            return
+
+        # 收集所有bk2文件
+        bk2_files = [f for f in os.listdir(self.backup_filepath)
+                     if f.lower().endswith('.bk2')]
+        if not bk2_files:
+            QMessageBox.information(self, '提示', '备用路径中没有找到.bk2文件!')
+            return
+
+        # 创建缩略图目录
+        os.makedirs(self.thumb_dir, exist_ok=True)
+
+        # 进度对话框
+        progress = QProgressDialog('正在生成预览图...', '取消', 0, len(bk2_files), self)
+        progress.setWindowTitle('生成预览图')
+        progress.setWindowModality(QtCore.Qt.WindowModal)
+
+        success = 0
+        for i, bk2 in enumerate(bk2_files):
+            if progress.wasCanceled():
+                break
+            progress.setLabelText(f'转换中: {bk2}')
+            progress.setValue(i)
+            QApplication.processEvents()
+
+            bk2_path = os.path.join(self.backup_filepath, bk2)
+            thumb_name = os.path.splitext(bk2)[0] + '.png'
+            thumb_path = os.path.join(self.thumb_dir, thumb_name)
+
+            # 强制删除旧缩略图，确保重新生成
+            if os.path.exists(thumb_path):
+                try:
+                    os.remove(thumb_path)
+                except Exception:
+                    pass
+
+            # 先获取视频时长，取中间帧避免开头白屏
+            duration = 0
+            probe = [ffmpeg, '-i', bk2_path]
+            try:
+                pr = subprocess.run(probe, capture_output=True, timeout=10,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                # 从stderr解析Duration: 00:00:05.xx
+                import re
+                m = re.search(r'Duration:\s*(\d+):(\d+):(\d+\.\d+)',
+                             pr.stderr.decode('utf-8', errors='ignore'))
+                if m:
+                    duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+            except Exception:
+                pass
+            # 取中间位置，至少0.5秒
+            seek_pos = max(0.5, duration / 2) if duration > 1 else 0.5
+
+            cmd = [ffmpeg, '-y', '-ss', f'{seek_pos:.2f}', '-i', bk2_path,
+                   '-vframes', '1', '-vf', 'scale=160:-1',
+                   '-q:v', '2', thumb_path]
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=15,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                if result.returncode == 0 and os.path.exists(thumb_path):
+                    # 验证缩略图不是全白（检查文件大小）
+                    if os.path.getsize(thumb_path) > 500:
+                        success += 1
+                    else:
+                        # 如果中间帧也失败，尝试取25%位置
+                        seek_pos2 = max(0.3, duration * 0.25) if duration > 1 else 0.3
+                        cmd2 = [ffmpeg, '-y', '-ss', f'{seek_pos2:.2f}', '-i', bk2_path,
+                                '-vframes', '1', '-vf', 'scale=160:-1',
+                                '-q:v', '2', thumb_path]
+                        r2 = subprocess.run(cmd2, capture_output=True, timeout=15,
+                                           creationflags=subprocess.CREATE_NO_WINDOW)
+                        if r2.returncode == 0 and os.path.exists(thumb_path):
+                            success += 1
+                else:
+                    # 最后回退：用select滤镜取第10帧
+                    cmd3 = [ffmpeg, '-y', '-i', bk2_path,
+                            '-vf', 'select=eq(n\,10),scale=160:-1',
+                            '-vframes', '1', '-q:v', '2', thumb_path]
+                    r3 = subprocess.run(cmd3, capture_output=True, timeout=15,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+                    if r3.returncode == 0 and os.path.exists(thumb_path):
+                        success += 1
+            except Exception:
+                pass
+
+        progress.setValue(len(bk2_files))
+        self.show_status(f'预览图生成完成: {success}/{len(bk2_files)}')
+        QMessageBox.information(self, '完成', f'预览图生成完成!\n成功: {success}/{len(bk2_files)}')
+
+    def open_gallery(self):
+        """打开备用库画廊"""
+        if not self.backup_filepath or not os.path.isdir(self.backup_filepath):
+            QMessageBox.warning(self, '警告', '请先设置备用动画路径!')
+            return
+
+        # 获取当前所有行（用于分配）
+        rows_info = []
+        for row in range(self.table.rowCount()):
+            config = self.get_row_config(row)
+            if config['vocation']:
+                rows_info.append({
+                    'row': row,
+                    'vocation': config['vocation'],
+                    'keyword': config['keyword'],
+                    'target_filename': config['target_filename']
+                })
+
+        if not rows_info:
+            QMessageBox.warning(self, '警告', '请先添加至少一个职业!')
+            return
+
+        dialog = Bk2GalleryDialog(
+            self.backup_filepath, self.thumb_dir, rows_info, self)
+        dialog.exec_()
     
     def import_excel(self, filepath=None):
         if filepath is None:
@@ -552,6 +1121,32 @@ class MainWindow(QMainWindow):
             if self.vocation_mapping.load_from_excel(filepath):
                 self.update_vocation_combos()
                 self.show_status(f'导入成功! 共{len(self.vocation_mapping.get_vocations())}个职业')
+                self.preset_manager.save_global_settings({
+                    'excel_path': filepath
+                }, merge=True)
+    
+    def auto_import_excel(self, gs):
+        """自动导入Excel对应表：优先使用用户导入路径，否则使用内嵌默认表"""
+        user_excel_path = gs.get('excel_path', '')
+        if user_excel_path and os.path.exists(user_excel_path):
+            if self.vocation_mapping.load_from_excel(user_excel_path):
+                self.update_vocation_combos()
+                self.show_status(f'已加载上次导入的对应表，共{len(self.vocation_mapping.get_vocations())}个职业')
+            return
+
+        # 尝试加载内嵌的默认Excel
+        import sys
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        default_excel = os.path.join(base_path, 'BUFF动画职业名对照表.xlsx')
+        
+        if os.path.exists(default_excel):
+            if self.vocation_mapping.load_from_excel(default_excel):
+                self.update_vocation_combos()
+                self.show_status(f'已加载默认对应表，共{len(self.vocation_mapping.get_vocations())}个职业')
+            else:
+                self.show_status('默认对应表加载失败')
+        else:
+            self.show_status('未找到对应表，请手动导入')
     
     def update_vocation_combos(self):
         vocations = self.vocation_mapping.get_vocations()
@@ -563,6 +1158,9 @@ class MainWindow(QMainWindow):
                 combo.addItems(vocations)
                 if current_text in vocations:
                     combo.setCurrentText(current_text)
+                combo.setEnabled(True)
+                combo.update()
+                combo.show()
     
     def add_row(self):
         row = self.table.rowCount()
@@ -570,26 +1168,81 @@ class MainWindow(QMainWindow):
         
         vocation_combo = QComboBox()
         vocation_combo.addItems(self.vocation_mapping.get_vocations())
+        vocation_combo.setMaxVisibleItems(30)
         self.table.setCellWidget(row, 0, vocation_combo)
-        
+
         keyword_edit = QLineEdit()
         self.table.setCellWidget(row, 1, keyword_edit)
-        
+
         interval_spin = QSpinBox()
         interval_spin.setRange(2, 300)
         interval_spin.setValue(self.default_interval_spin.value())
         self.table.setCellWidget(row, 2, interval_spin)
-        
+
         start_btn = QPushButton('启动')
         start_btn.clicked.connect(lambda checked, r=row: self.toggle_switcher(r))
         self.table.setCellWidget(row, 3, start_btn)
-    
-    def delete_row(self):
-        current_row = self.table.currentRow()
-        if current_row >= 0:
-            self.stop_switcher(current_row)
-            self.table.removeRow(current_row)
-    
+
+        delete_btn = QPushButton('删除')
+        delete_btn.clicked.connect(lambda checked, r=row: self.delete_row(r))
+        delete_btn.setStyleSheet('color: red;')
+        self.table.setCellWidget(row, 4, delete_btn)
+
+    def delete_row(self, row):
+        if row >= 0:
+            self.stop_switcher(row)
+            self.table.removeRow(row)
+            # 更新switchers字典中的行号
+            new_switchers = {}
+            for r, switcher in self.switchers.items():
+                if r < row:
+                    new_switchers[r] = switcher
+                elif r > row:
+                    new_switchers[r - 1] = switcher
+            self.switchers = new_switchers
+
+    def preview_bk2(self, row):
+        """预览该职业的bk2动画文件"""
+        config = self.get_row_config(row)
+        filepath = config.get('filepath', '')
+        target_filename = config.get('target_filename', '')
+        keyword = config.get('keyword', '')
+        vocation = config.get('vocation', '')
+
+        if not filepath or not os.path.isdir(filepath):
+            QMessageBox.warning(self, '警告', '请先设置Buff动画路径!')
+            return
+        if not target_filename and not keyword:
+            QMessageBox.warning(self, '警告', '请先选择职业或输入动画分组!')
+            return
+
+        # 优先找目标文件
+        bk2_path = None
+        if target_filename:
+            p = os.path.join(filepath, target_filename)
+            if os.path.exists(p):
+                bk2_path = p
+
+        # 没有目标文件，找含动画分组的备用文件
+        if not bk2_path and keyword:
+            for f in os.listdir(filepath):
+                if (keyword.lower() in f.lower()
+                        and f.lower().endswith('.bk2')):
+                    bk2_path = os.path.join(filepath, f)
+                    break
+
+        if not bk2_path:
+            QMessageBox.warning(self, '警告',
+                f'未找到可预览的bk2文件!\n\n'
+                f'职业: {vocation}\n'
+                f'目标文件: {target_filename}\n'
+                f'动画分组: {keyword}\n\n'
+                f'请在文件夹中确认是否存在对应的bk2文件。')
+            return
+
+        dialog = Bk2PreviewDialog(bk2_path, self)
+        dialog.exec_()
+
     def get_row_config(self, row):
         """获取行配置，只返回可序列化的基本类型"""
         vocation_combo = self.table.cellWidget(row, 0)
@@ -621,7 +1274,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, '警告', '请选择职业!')
                 return
             if not config['keyword']:
-                QMessageBox.warning(self, '警告', '请输入关键词!')
+                QMessageBox.warning(self, '警告', '请输入动画分组!')
                 return
             if not config['filepath']:
                 QMessageBox.warning(self, '警告', '请设置Buff动画路径!')
@@ -767,6 +1420,7 @@ class MainWindow(QMainWindow):
         
         preset_data = {
             'filepath': str(self.global_filepath),
+            'backup_filepath': str(self.backup_filepath),
             'default_interval': int(self.default_interval_spin.value()),
             'auto_start': bool(self.auto_start_check.isChecked()),
             'boot_start': bool(self.boot_start_check.isChecked()),
@@ -807,6 +1461,8 @@ class MainWindow(QMainWindow):
         # 恢复全局设置
         self.global_filepath = preset_data.get('filepath', '')
         self.path_edit.setText(self.global_filepath)
+        self.backup_filepath = preset_data.get('backup_filepath', '')
+        self.backup_path_edit.setText(self.backup_filepath)
         self.default_interval_spin.setValue(preset_data.get('default_interval', 30))
         self.auto_start_check.setChecked(preset_data.get('auto_start', False))
         self.boot_start_check.setChecked(preset_data.get('boot_start', False))
@@ -826,6 +1482,7 @@ class MainWindow(QMainWindow):
             
             vocation_combo = QComboBox()
             vocation_combo.addItems(self.vocation_mapping.get_vocations())
+            vocation_combo.setMaxVisibleItems(30)
             vocation_combo.setCurrentText(config.get('vocation', ''))
             self.table.setCellWidget(row, 0, vocation_combo)
             
@@ -840,7 +1497,12 @@ class MainWindow(QMainWindow):
             start_btn = QPushButton('启动')
             start_btn.clicked.connect(lambda checked, r=row: self.toggle_switcher(r))
             self.table.setCellWidget(row, 3, start_btn)
-        
+
+            delete_btn = QPushButton('删除')
+            delete_btn.clicked.connect(lambda checked, r=row: self.delete_row(r))
+            delete_btn.setStyleSheet('color: red;')
+            self.table.setCellWidget(row, 4, delete_btn)
+
         # 自动启动
         if self.auto_start_check.isChecked():
             self.start_all()
