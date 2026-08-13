@@ -1,8 +1,18 @@
+# 构建产物
 dist/
 build/
+main.build/
+DnfBuffAnimeSwitcher/
+
+# 打包产物
+*.exe
+*.zip
+
+# Python 缓存
 __pycache__/
 *.pyc
-*.spec
+
+# 运行配置与临时数据
 config.json
 *.log
 thumbnails/

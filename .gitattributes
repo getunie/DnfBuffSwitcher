@@ -1,0 +1,2 @@
+# 强制批处理脚本使用 CRLF 换行，避免 cmd 解析失败导致闪退
+*.bat text eol=crlf

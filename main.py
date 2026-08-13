@@ -12,7 +12,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QCheckBox, QTextEdit, QGroupBox, QHeaderView, 
                              QSystemTrayIcon, QMenu, QAction, QDialog,
                              QDialogButtonBox, QStatusBar, QScrollArea,
-                             QGridLayout, QFrame, QProgressBar, QProgressDialog)
+                             QGridLayout, QFrame, QProgressBar, QProgressDialog,
+                             QListWidget, QListWidgetItem)
 from PyQt5.QtGui import QIcon, QMovie, QPixmap
 import subprocess
 import tempfile
@@ -74,34 +75,21 @@ class Bk2PreviewDialog(QDialog):
     """Bk2动画预览对话框：用ffmpeg转gif后用QMovie播放"""
     def __init__(self, bk2_path, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('Buff动画预览')
-        self.setMinimumSize(380, 280)
+        name = os.path.basename(bk2_path)
+        self.setWindowTitle(f'Buff预览 - {name}')
+        self.setMinimumSize(100, 100)
         self.bk2_path = bk2_path
         self.gif_path = None
         self.movie = None
 
         layout = QVBoxLayout(self)
-
-        # 文件名
-        name = os.path.basename(bk2_path)
-        layout.addWidget(QLabel(f'文件: {name}'))
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # 预览区域
-        self.preview_label = QLabel('正在转换，请稍候...')
+        self.preview_label = QLabel('转换中...')
         self.preview_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.preview_label.setMinimumSize(320, 180)
         layout.addWidget(self.preview_label)
-
-        # 按钮
-        btn_layout = QHBoxLayout()
-        open_ext_btn = QPushButton('用系统默认程序打开')
-        open_ext_btn.clicked.connect(self.open_external)
-        btn_layout.addWidget(open_ext_btn)
-        btn_layout.addStretch()
-        close_btn = QPushButton('关闭')
-        close_btn.clicked.connect(self.close)
-        btn_layout.addWidget(close_btn)
-        layout.addLayout(btn_layout)
 
         # 开始转换
         QtCore.QTimer.singleShot(100, self.convert_to_gif)
@@ -121,9 +109,9 @@ class Bk2PreviewDialog(QDialog):
         if os.path.exists(self.gif_path):
             os.remove(self.gif_path)
 
-        # 调用ffmpeg转换: 10fps, 宽度320, 最多5秒
+        # 调用ffmpeg转换: 10fps, 保持原始尺寸, 最多5秒
         cmd = [ffmpeg, '-y', '-i', self.bk2_path,
-               '-vf', 'fps=10,scale=320:-1:flags=lanczos',
+               '-vf', 'fps=10',
                '-t', '5', '-loop', '0', self.gif_path]
 
         try:
@@ -143,9 +131,21 @@ class Bk2PreviewDialog(QDialog):
             self.preview_label.setText('无法加载gif，请用系统默认程序打开。')
             return
         self.movie.setCacheMode(QMovie.CacheAll)
+        self.movie.frameChanged.connect(self.on_frame_changed)
         self.movie.start()
         self.preview_label.setMovie(self.movie)
         self.preview_label.setText('')
+
+    def on_frame_changed(self, frame_number):
+        """帧变化时调整窗口大小"""
+        if self.movie and self.movie.state() == QMovie.Running:
+            frame_pixmap = self.movie.currentPixmap()
+            if not frame_pixmap.isNull():
+                actual_size = frame_pixmap.size()
+                if actual_size.width() > 0 and actual_size.height() > 0:
+                    self.preview_label.setFixedSize(actual_size)
+                    self.adjustSize()
+                    self.movie.frameChanged.disconnect(self.on_frame_changed)
 
     def open_external(self):
         try:
@@ -168,25 +168,21 @@ class Bk2GalleryDialog(QDialog):
     """备用库画廊：展示所有bk2缩略图，可分配给职业"""
     def __init__(self, backup_path, thumb_dir, rows_info, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('备用动画库 - 点击选择后分配给职业')
+        self.setWindowTitle('备用动画库 - 框选/Ctrl+A/Shift选择')
         self.setMinimumSize(740, 740)
         self.backup_path = backup_path
         self.thumb_dir = thumb_dir
         self.rows_info = rows_info
         self.main_window = parent
-        self.selected_files = set()
-        self.frame_widgets = {}
         self.preview_mode = 'standard'
-        self.bk2_files = []
 
         self.STANDARD_SIZE = (180, 140)
         self.LARGE_SIZE = (360, 280)
 
         layout = QVBoxLayout(self)
 
-        # 顶部说明 + 全选/取消全选 + 模式切换
         top_bar = QHBoxLayout()
-        top_label = QLabel('点击缩略图选中/取消，支持多选。选好后选择职业并点击"分配"')
+        top_label = QLabel('支持框选、Ctrl+A全选、Ctrl+点击多选、Shift+点击范围选')
         top_label.setStyleSheet('color: #555; padding: 4px;')
         top_bar.addWidget(top_label)
         top_bar.addStretch()
@@ -203,14 +199,17 @@ class Bk2GalleryDialog(QDialog):
         top_bar.addWidget(self.deselect_all_btn)
         layout.addLayout(top_bar)
 
-        # 缩略图网格
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll_content = QWidget()
-        self.grid = QGridLayout(self.scroll_content)
-        self.grid.setSpacing(8)
-        self.scroll.setWidget(self.scroll_content)
-        layout.addWidget(self.scroll)
+        # 使用QListWidget实现任务管理器式选择
+        self.list_widget = QListWidget()
+        self.list_widget.setViewMode(QListWidget.IconMode)
+        self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)
+        self.list_widget.setResizeMode(QListWidget.Adjust)
+        self.list_widget.setSpacing(8)
+        self.list_widget.setDragEnabled(False)
+        self.list_widget.setDragDropMode(QListWidget.NoDragDrop)
+        self.list_widget.itemSelectionChanged.connect(self.on_selection_changed)
+        self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        layout.addWidget(self.list_widget)
 
         # 底部分配栏
         bottom = QHBoxLayout()
@@ -251,7 +250,7 @@ class Bk2GalleryDialog(QDialog):
 
     def toggle_mode(self):
         """切换预览模式"""
-        saved_selection = set(self.selected_files)
+        saved_selection = [item.data(QtCore.Qt.UserRole) for item in self.list_widget.selectedItems()]
         if self.preview_mode == 'standard':
             self.preview_mode = 'large'
             self.mode_btn.setText('标准预览')
@@ -259,111 +258,51 @@ class Bk2GalleryDialog(QDialog):
             self.preview_mode = 'standard'
             self.mode_btn.setText('大图预览')
         self.load_thumbnails()
-        self.selected_files = saved_selection & set(self.frame_widgets.keys())
-        self.update_selection_ui()
+        for item in self.list_widget.findItems("", QtCore.Qt.MatchContains):
+            bk2 = item.data(QtCore.Qt.UserRole)
+            if bk2 in saved_selection:
+                item.setSelected(True)
 
     def load_thumbnails(self):
         """加载所有bk2缩略图"""
-        self.bk2_files = sorted([f for f in os.listdir(self.backup_path)
-                                if f.lower().endswith('.bk2')])
-        if not self.bk2_files:
+        self.list_widget.clear()
+        bk2_files = sorted([f for f in os.listdir(self.backup_path)
+                           if f.lower().endswith('.bk2')])
+        if not bk2_files:
             self.selected_label.setText('备用路径中没有.bk2文件')
             return
-
-        self.frame_widgets.clear()
-        for i in range(self.grid.count()):
-            item = self.grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
 
         size = self.LARGE_SIZE if self.preview_mode == 'large' else self.STANDARD_SIZE
         img_size = (size[0] - 10, int(size[1] * 0.68))
 
-        for bk2 in self.bk2_files:
-            frame = QFrame()
-            frame.setFrameStyle(QFrame.Box)
-            frame.setFixedSize(size[0], size[1])
-            frame_layout = QVBoxLayout(frame)
-            frame_layout.setContentsMargins(2, 2, 2, 2)
+        self.list_widget.setIconSize(QtCore.QSize(img_size[0], img_size[1]))
+        self.list_widget.setGridSize(QtCore.QSize(size[0], size[1]))
 
+        for bk2 in bk2_files:
             thumb_name = os.path.splitext(bk2)[0] + '.png'
             thumb_path = os.path.join(self.thumb_dir, thumb_name)
-            img_label = QLabel()
-            img_label.setAlignment(QtCore.Qt.AlignCenter)
-            img_label.setMinimumSize(img_size[0], img_size[1])
+
             if os.path.exists(thumb_path):
                 pix = QPixmap(thumb_path)
                 if not pix.isNull():
-                    img_label.setPixmap(pix.scaled(img_size[0], img_size[1],
-                                                   QtCore.Qt.KeepAspectRatio,
-                                                   QtCore.Qt.SmoothTransformation))
+                    icon = QIcon(pix.scaled(img_size[0], img_size[1],
+                                           QtCore.Qt.KeepAspectRatio,
+                                           QtCore.Qt.SmoothTransformation))
                 else:
-                    img_label.setText('无预览图')
+                    icon = QIcon()
             else:
-                img_label.setText('未生成\n预览图')
+                icon = QIcon()
 
-            name_label = QLabel(bk2)
-            name_label.setWordWrap(True)
-            name_label.setMaximumHeight(size[1] - img_size[1] - 8)
-            name_label.setStyleSheet('font-size: 10px;')
+            item = QListWidgetItem(icon, bk2)
+            item.setData(QtCore.Qt.UserRole, bk2)
+            item.setTextAlignment(QtCore.Qt.AlignHCenter)
+            item.setToolTip(bk2)
+            self.list_widget.addItem(item)
 
-            frame_layout.addWidget(img_label)
-            frame_layout.addWidget(name_label)
-
-            frame.mousePressEvent = lambda e, f=bk2: self.toggle_select(f)
-            img_label.mousePressEvent = lambda e, f=bk2: self.toggle_select(f)
-            name_label.mousePressEvent = lambda e, f=bk2: self.toggle_select(f)
-
-            self.frame_widgets[bk2] = frame
-
-        self.layout_thumbnails()
-
-    def layout_thumbnails(self):
-        """根据窗口宽度动态布局缩略图"""
-        for i in range(self.grid.count()):
-            item = self.grid.takeAt(0)
-            if item.widget():
-                item.widget().setParent(None)
-
-        if not self.bk2_files:
-            return
-
-        size = self.LARGE_SIZE if self.preview_mode == 'large' else self.STANDARD_SIZE
-        spacing = 8
-
-        container_width = self.scroll_content.width()
-        if container_width < 100:
-            container_width = 720
-
-        col_count = max(1, container_width // (size[0] + spacing))
-        col_count = max(1, min(col_count, len(self.bk2_files)))
-
-        for i, bk2 in enumerate(self.bk2_files):
-            row = i // col_count
-            col = i % col_count
-            self.grid.addWidget(self.frame_widgets[bk2], row, col)
-
-    def resizeEvent(self, event):
-        """窗口大小变化时重新布局"""
-        super().resizeEvent(event)
-        QtCore.QTimer.singleShot(50, self.layout_thumbnails)
-
-    def toggle_select(self, bk2_name):
-        """切换选中状态"""
-        if bk2_name in self.selected_files:
-            self.selected_files.discard(bk2_name)
-        else:
-            self.selected_files.add(bk2_name)
-        self.update_selection_ui()
-
-    def update_selection_ui(self):
-        """更新选中状态UI"""
-        for bk2, frame in self.frame_widgets.items():
-            if bk2 in self.selected_files:
-                frame.setStyleSheet('QFrame { border: 3px solid #2196F3; background-color: #E3F2FD; }')
-            else:
-                frame.setStyleSheet('')
-        count = len(self.selected_files)
+    def on_selection_changed(self):
+        """选择变化时更新UI"""
+        selected_items = self.list_widget.selectedItems()
+        count = len(selected_items)
         if count == 0:
             self.selected_label.setText('未选择文件')
             self.selected_label.setStyleSheet('color: #555; padding: 4px;')
@@ -375,28 +314,35 @@ class Bk2GalleryDialog(QDialog):
             self.assign_btn.setEnabled(True)
             self.preview_btn.setEnabled(count == 1)
 
+    def on_item_double_clicked(self, item):
+        """双击预览动画"""
+        bk2_name = item.data(QtCore.Qt.UserRole)
+        bk2_path = os.path.join(self.backup_path, bk2_name)
+        dlg = Bk2PreviewDialog(bk2_path, self)
+        dlg.exec_()
+
     def select_all(self):
         """全选"""
-        self.selected_files = set(self.frame_widgets.keys())
-        self.update_selection_ui()
+        self.list_widget.selectAll()
 
     def deselect_all(self):
         """取消全选"""
-        self.selected_files.clear()
-        self.update_selection_ui()
+        self.list_widget.clearSelection()
 
     def preview_selected(self):
         """预览选中的bk2（仅单选时可用）"""
-        if len(self.selected_files) != 1:
+        selected_items = self.list_widget.selectedItems()
+        if len(selected_items) != 1:
             return
-        bk2_name = next(iter(self.selected_files))
+        bk2_name = selected_items[0].data(QtCore.Qt.UserRole)
         bk2_path = os.path.join(self.backup_path, bk2_name)
         dlg = Bk2PreviewDialog(bk2_path, self)
         dlg.exec_()
 
     def assign_to_vocation(self):
         """将选中的多个bk2复制到动画路径，以动画分组前缀命名"""
-        if not self.selected_files:
+        selected_items = self.list_widget.selectedItems()
+        if not selected_items:
             return
 
         keyword = self.vocation_combo.currentData()
@@ -410,26 +356,77 @@ class Bk2GalleryDialog(QDialog):
             QMessageBox.warning(self, '警告', '主动画路径未设置!')
             return
 
-        # 确认对话框，显示目标路径
         current_text = self.vocation_combo.currentText()
-        confirm = QMessageBox.question(
-            self, '确认分配',
-            f'即将将 {len(self.selected_files)} 个文件复制到:\n\n'
+
+        # 当前分组包含的所有职业
+        group_vocations = [i['vocation'] for i in self.rows_info if i.get('keyword') == keyword]
+
+        # 弹窗1：是否删除原版Buff动画
+        delete_original = False
+        if group_vocations:
+            orig_files = []
+            for voc in group_vocations:
+                orig = self.main_window.vocation_mapping.get_target_filename(voc)
+                if orig and orig not in orig_files:
+                    orig_files.append(orig)
+            if orig_files:
+                ret = QMessageBox.question(
+                    self, '删除原版Buff动画',
+                    f'是否删除当前分组的原版Buff动画？\n\n'
+                    f'分组: {current_text}\n'
+                    f'将删除以下原版文件:\n'
+                    f'{chr(10).join("- " + f for f in orig_files)}\n\n'
+                    f'选择"是"将删除这些原版动画文件；\n'
+                    f'选择"否"则保留原版文件。',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                delete_original = (ret == QMessageBox.Yes)
+
+        # 弹窗2：确认分配
+        assign_msg = (
+            f'即将将 {len(selected_items)} 个文件复制到:\n\n'
             f'{target_filepath}\n\n'
             f'动画分组: {keyword}\n'
             f'关联职业: {current_text}\n'
             f'文件名格式: {keyword}随机数.bk2\n\n'
-            '是否继续?',
+        )
+        if delete_original:
+            assign_msg += '[注意] 将先删除该分组所选职业的原版Buff动画文件\n\n'
+        assign_msg += '是否继续?'
+
+        confirm = QMessageBox.question(
+            self, '确认分配',
+            assign_msg,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
         if confirm != QMessageBox.Yes:
             return
 
+        # 复制前：删除原版Buff动画文件
+        deleted = []
+        del_fail = []
+        if delete_original:
+            def _remove_original(orig):
+                p = os.path.join(target_filepath, orig)
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        return True
+                    except Exception as e:
+                        del_fail.append(f'{orig}: {e}')
+                return False
+            for voc in group_vocations:
+                orig = self.main_window.vocation_mapping.get_target_filename(voc)
+                if orig and _remove_original(orig):
+                    deleted.append(orig)
+
         # 批量复制
         success = 0
         failed = []
-        for bk2_name in self.selected_files:
+        for item in selected_items:
+            bk2_name = item.data(QtCore.Qt.UserRole)
             src = os.path.join(self.backup_path, bk2_name)
             if keyword:
                 new_name = f"{keyword}{random.randint(1000, 9999)}.bk2"
@@ -442,11 +439,19 @@ class Bk2GalleryDialog(QDialog):
             except Exception as e:
                 failed.append(f'{bk2_name}: {e}')
 
-        msg = f'复制完成! 成功: {success}/{len(self.selected_files)}'
+        msg = f'复制完成! 成功: {success}/{len(selected_items)}'
+        if delete_original:
+            msg += f'\n\n已删除原版文件: {len(deleted)} 个'
+            if del_fail:
+                msg += f'\n删除失败:\n' + '\n'.join(del_fail[:5])
         if failed:
-            msg += f'\n\n失败:\n' + '\n'.join(failed[:5])
+            msg += f'\n\n复制失败:\n' + '\n'.join(failed[:5])
         QMessageBox.information(self, '完成', msg)
-        self.main_window.show_status(f'已分配 {success} 个文件到动画路径')
+
+        status = f'已分配 {success} 个文件到动画路径'
+        if delete_original:
+            status += f'，删除原版 {len(deleted)} 个'
+        self.main_window.show_status(status)
 
 
 class GlobalFileManager:
@@ -685,9 +690,16 @@ class PresetManager:
         self.last_preset = name
         self.save_presets()
     
-    def save_global_settings(self, settings):
-        """单独保存全局设置，不依赖预设"""
-        self.global_settings = settings
+    def save_global_settings(self, settings, merge=False):
+        """单独保存全局设置，不依赖预设
+        merge=True时合并到现有设置，避免覆盖丢失其他配置
+        """
+        if merge:
+            if not self.global_settings:
+                self.global_settings = {}
+            self.global_settings.update(settings)
+        else:
+            self.global_settings = settings
         self.save_presets()
     
     def get_global_settings(self):
@@ -711,6 +723,9 @@ class PresetManager:
 
 
 class MainWindow(QMainWindow):
+    # Excel导入完成信号: (成功标志, 消息, 职业数量, 是否手动导入)
+    signal_excel_loaded = QtCore.pyqtSignal(bool, str, int, bool)
+
     def __init__(self, start_minimized=False):
         super().__init__()
         self.setWindowTitle("DNF Buff动画随机切换工具")
@@ -728,11 +743,10 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self.init_tray()
-        
-        # 自动加载默认对照表
-        if os.path.exists(DEFAULT_EXCEL_PATH):
-            self.vocation_mapping.load_from_excel(DEFAULT_EXCEL_PATH)
-        
+
+        # 连接Excel导入完成信号（线程安全）
+        self.signal_excel_loaded.connect(self._on_excel_loaded)
+
         # 先恢复全局设置（不依赖预设）
         self._loading = True
         gs = self.preset_manager.get_global_settings()
@@ -748,7 +762,7 @@ class MainWindow(QMainWindow):
             self.backup_path_edit.setText(self.backup_filepath)
         self.default_interval_spin.setValue(gs.get('default_interval', 30))
 
-        # 自动导入Excel对应表
+        # 自动导入Excel对应表（后台线程，避免卡死）
         self.auto_import_excel(gs)
 
         self._loading = False
@@ -1118,35 +1132,86 @@ class MainWindow(QMainWindow):
         if filepath is None:
             filepath, _ = QFileDialog.getOpenFileName(self, '导入Excel文件', '', 'Excel文件 (*.xlsx)')
         if filepath:
-            if self.vocation_mapping.load_from_excel(filepath):
-                self.update_vocation_combos()
-                self.show_status(f'导入成功! 共{len(self.vocation_mapping.get_vocations())}个职业')
+            self.show_status('正在导入Excel，请稍候...')
+            threading.Thread(
+                target=self._import_excel_worker,
+                args=(filepath,),
+                daemon=True
+            ).start()
+
+    def _import_excel_worker(self, filepath):
+        """后台线程：执行耗时的Excel加载，完成后发信号回主线程"""
+        try:
+            success = self.vocation_mapping.load_from_excel(filepath)
+            if success:
+                count = len(self.vocation_mapping.get_vocations())
+                self.signal_excel_loaded.emit(True, filepath, count, True)
+            else:
+                self.signal_excel_loaded.emit(False, 'Excel格式错误或无有效数据', 0, True)
+        except Exception as e:
+            self.signal_excel_loaded.emit(False, str(e), 0, True)
+
+    @QtCore.pyqtSlot(bool, str, int, bool)
+    def _on_excel_loaded(self, success, message, count, is_manual):
+        """主线程：更新UI（线程安全）
+        is_manual: True为用户手动导入，False为启动自动加载
+        """
+        if success:
+            self.update_vocation_combos()
+            if is_manual:
+                # 手动导入：保存路径并弹窗提示
+                self.show_status(f'导入成功! 共{count}个职业')
                 self.preset_manager.save_global_settings({
-                    'excel_path': filepath
+                    'excel_path': message
                 }, merge=True)
-    
+                QMessageBox.information(self, '导入成功', f'共导入{count}个职业')
+            else:
+                # 自动加载：仅状态栏提示，不弹窗
+                if message:
+                    self.show_status(f'已加载职业对应表，共{count}个职业')
+                else:
+                    self.show_status(f'已加载默认对应表，共{count}个职业')
+        else:
+            self.show_status(f'导入失败: {message}')
+            if is_manual:
+                # 只有手动导入失败才弹窗
+                QMessageBox.warning(self, '导入失败', f'无法导入Excel文件:\n{message}')
+
     def auto_import_excel(self, gs):
         """自动导入Excel对应表：优先使用用户导入路径，否则使用内嵌默认表"""
+        self.show_status('正在加载职业对应表...')
+        threading.Thread(
+            target=self._auto_import_excel_worker,
+            args=(gs,),
+            daemon=True
+        ).start()
+
+    def _auto_import_excel_worker(self, gs):
+        """后台线程：自动加载对应表"""
+        # 1. 优先使用用户之前导入的路径
         user_excel_path = gs.get('excel_path', '')
         if user_excel_path and os.path.exists(user_excel_path):
-            if self.vocation_mapping.load_from_excel(user_excel_path):
-                self.update_vocation_combos()
-                self.show_status(f'已加载上次导入的对应表，共{len(self.vocation_mapping.get_vocations())}个职业')
-            return
+            try:
+                if self.vocation_mapping.load_from_excel(user_excel_path):
+                    count = len(self.vocation_mapping.get_vocations())
+                    self.signal_excel_loaded.emit(True, 'user', count, False)
+                    return
+            except Exception:
+                pass
 
-        # 尝试加载内嵌的默认Excel
-        import sys
-        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        default_excel = os.path.join(base_path, 'BUFF动画职业名对照表.xlsx')
-        
-        if os.path.exists(default_excel):
-            if self.vocation_mapping.load_from_excel(default_excel):
-                self.update_vocation_combos()
-                self.show_status(f'已加载默认对应表，共{len(self.vocation_mapping.get_vocations())}个职业')
-            else:
-                self.show_status('默认对应表加载失败')
-        else:
-            self.show_status('未找到对应表，请手动导入')
+        # 2. 尝试加载默认Excel（程序目录或打包资源目录）
+        if os.path.exists(DEFAULT_EXCEL_PATH):
+            try:
+                if self.vocation_mapping.load_from_excel(DEFAULT_EXCEL_PATH):
+                    count = len(self.vocation_mapping.get_vocations())
+                    self.signal_excel_loaded.emit(True, '', count, False)
+                    return
+            except Exception as e:
+                self.signal_excel_loaded.emit(False, str(e), 0, False)
+                return
+
+        # 3. 都没找到
+        self.signal_excel_loaded.emit(False, '未找到对应表，请点击"导入对应表"按钮手动导入', 0, False)
     
     def update_vocation_combos(self):
         vocations = self.vocation_mapping.get_vocations()
@@ -1616,7 +1681,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     import socket
-    
+
     # 单实例检测
     def is_single_instance():
         try:
@@ -1625,7 +1690,7 @@ if __name__ == '__main__':
             return sock
         except OSError:
             return None
-    
+
     sock = is_single_instance()
     if sock is None:
         QMessageBox.warning(None, '提示', '程序已在运行中！')
